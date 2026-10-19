@@ -95,26 +95,44 @@ def detect_explicit_language_switch(message):
     return None
 
 
+def detect_message_language(message):
+    """Detect the latest message language, including romanized spoken Hindi."""
+    text = str(message or "").lower().strip()
+    if re.search(r"[\u0900-\u097f]", text):
+        return "hindi"
+
+    # Browser speech recognition may transcribe Hindi speech as Latin-script text.
+    hindi_patterns = [
+        r"\bmerko\b", r"\bmujhe\b", r"\bmere\b", r"\bmera\b",
+        r"\bmeri\b", r"\baapka\b", r"\baapki\b", r"\bbatao\b",
+        r"\bbataiye\b", r"\bkya\b", r"\bkaise\b", r"\bkab\b",
+        r"\bkyun\b", r"\bkitna\b", r"\bkitne\b", r"\bchahiye\b",
+        r"\bhai\b", r"\bhain\b", r"\bka\b", r"\bki\b", r"\bko\b",
+        r"\bke\s+bare\s+mein\b", r"\bke\s+baare\s+mein\b", r"\bmein\b"
+    ]
+    matches = sum(bool(re.search(pattern, text)) for pattern in hindi_patterns)
+    if matches >= 2 or re.search(r"\b(?:merko|mujhe)\b.*\b(?:batao|bataiye)\b", text):
+        return "hindi"
+    return "english"
+
+
 def language_instruction(language):
     """Build a per-request instruction without polluting saved conversation history."""
     instructions = {
         "hindi": (
-            "PERSISTENT LANGUAGE PREFERENCE: The customer explicitly chose Hindi. "
-            "Reply in natural Hindi written in Devanagari for this and every following "
-            "turn until they explicitly request another language. Do not switch to English "
-            "or Hinglish just because their message contains English words. Preserve order "
+            "RESPONSE LANGUAGE: Reply in natural Hindi written in Devanagari for this response. "
+            "Do not switch to English or Hinglish just because the customer's message contains "
+            "English words. Preserve order "
             "IDs, product names, courier names, and tracking codes exactly."
         ),
         "english": (
-            "PERSISTENT LANGUAGE PREFERENCE: The customer explicitly chose English. "
-            "Reply in English for every following turn until they explicitly request another "
-            "language. Do not switch because their message contains Hindi or Hinglish. "
-            "Preserve order IDs, product names, courier names, and tracking codes exactly."
+            "RESPONSE LANGUAGE: Reply entirely in English for this response. Do not switch because "
+            "the customer's message contains Hindi or Hinglish. Preserve order IDs, product names, "
+            "courier names, and tracking codes exactly."
         ),
         "hinglish": (
-            "PERSISTENT LANGUAGE PREFERENCE: The customer explicitly chose Hinglish. "
-            "Reply in natural conversational Hinglish using Latin script for every following "
-            "turn until they explicitly request another language. Preserve order IDs, product "
+            "RESPONSE LANGUAGE: Reply in natural conversational Hinglish using Latin script for this "
+            "response. Preserve order IDs, product "
             "names, courier names, and tracking codes exactly."
         ),
     }
@@ -256,14 +274,39 @@ def chat():
             "error": "Empty message"
         }), 400
 
-    # Keep an explicit language choice for the whole active call. Ordinary messages
-    # do not reset it; only another explicit language request changes it.
+    # Keep the language preference for the whole active call. Recover it from
+    # prior user turns as a fallback, so a missing/stale session value cannot make
+    # Aria switch back to English after a customer explicitly chose Hindi.
+    history = get_session_history()
     requested_language = detect_explicit_language_switch(user_message)
+
     if requested_language:
         session["response_language"] = requested_language
-    response_language = session.get("response_language", "auto")
+        response_language = requested_language
+    else:
+        response_language = session.get("response_language", "auto")
+        if response_language not in ("hindi", "english", "hinglish"):
+            response_language = "auto"
 
-    history = get_session_history()
+        # Find the most recent explicit language choice in the conversation.
+        # Ignore the current message because it has not yet been appended.
+        for previous_message in reversed(history):
+            if previous_message.get("role") != "user":
+                continue
+            previous_language = detect_explicit_language_switch(
+                previous_message.get("content", "")
+            )
+            if previous_language:
+                response_language = previous_language
+                session["response_language"] = previous_language
+                break
+
+    # If no explicit preference is active, infer the language from this utterance.
+    # Example: "merko mere order 101 ke bare mein batao" is Hindi speech
+    # commonly transcribed by the browser using Latin characters.
+    if response_language == "auto":
+        response_language = detect_message_language(user_message)
+
     history.append({
         "role": "user",
         "content": user_message
