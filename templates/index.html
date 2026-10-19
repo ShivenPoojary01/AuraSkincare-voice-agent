@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,21 +14,25 @@
             background-color: #f4f7f6;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
+
         .chat-container {
             max-width: 900px;
             margin: 40px auto;
         }
+
         .card-custom {
             border: none;
             border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
         }
+
         .status-badge {
             font-size: 0.9rem;
             padding: 8px 16px;
             border-radius: 50rem;
             font-weight: 600;
         }
+
         .transcript-box {
             height: 300px;
             overflow-y: auto;
@@ -36,23 +41,27 @@
             border-radius: 8px;
             padding: 15px;
         }
+
         .message-bubble {
             margin-bottom: 12px;
             padding: 10px 14px;
             border-radius: 8px;
             max-width: 80%;
         }
+
         .user-msg {
             background-color: #d1e7dd;
             color: #0f5132;
             margin-left: auto;
             text-align: right;
         }
+
         .agent-msg {
             background-color: #cfe2ff;
             color: #084298;
             margin-right: auto;
         }
+
         .json-box {
             background: #1e1e1e;
             color: #d4d4d4;
@@ -65,6 +74,7 @@
         }
     </style>
 </head>
+
 <body>
 
     <div class="container chat-container">
@@ -87,34 +97,54 @@
                     </div>
 
                     <!-- Call Action Buttons -->
-                    <div class="d-grid gap-2 d-md-flex justify-content-md-start mb-4">
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-start mb-3">
                         <button id="startBtn" class="btn btn-success flex-fill py-2 fw-semibold" onclick="startCall()">
                             <i class="fa-solid fa-phone me-2"></i> Start Call
                         </button>
-                        <button id="endBtn" class="btn btn-danger flex-fill py-2 fw-semibold" onclick="endCall()" disabled>
+                        <button id="endBtn" class="btn btn-danger flex-fill py-2 fw-semibold" onclick="endCall()"
+                            disabled>
                             <i class="fa-solid fa-phone-slash me-2"></i> End Call
+                        </button>
+                        <button id="retryVoiceBtn" class="btn btn-outline-warning flex-fill py-2 fw-semibold"
+                            onclick="retryVoiceRecognition()" hidden>
+                            <i class="fa-solid fa-rotate-right me-2"></i> Retry Voice
+                        </button>
+                    </div>
+
+                    <!-- Text Input Fallback (Bypasses network speech errors) -->
+                    <div class="input-group mb-3">
+                        <input type="text" id="userInputText" class="form-control"
+                            placeholder="Type a message to Aria (e.g. Where is ORD-101?)..."
+                            onkeypress="handleKeyPress(event)">
+                        <button class="btn btn-outline-primary" type="button" onclick="sendTextMessage()">
+                            <i class="fa-solid fa-paper-plane"></i> Send
                         </button>
                     </div>
 
                     <!-- Live Transcript Log -->
                     <label class="form-label fw-semibold text-secondary">Call Transcript</label>
                     <div id="transcriptBox" class="transcript-box mb-3">
-                        <p class="text-muted text-center italic mt-5">Click 'Start Call' to begin speaking with Aria...</p>
+                        <p class="text-muted text-center italic mt-5">Click 'Start Call' to begin speaking with Aria...
+                        </p>
                     </div>
                 </div>
 
                 <!-- Post-Call Structured Summary -->
                 <div class="card card-custom p-4">
-                    <h5 class="fw-semibold mb-3"><i class="fa-solid fa-code me-2 text-primary"></i>Structured Call Outcome (JSON)</h5>
-                    <pre id="jsonSummary" class="json-box"><code>// Summary will generate when the call ends...</code></pre>
+                    <h5 class="fw-semibold mb-3"><i class="fa-solid fa-code me-2 text-primary"></i>Structured Call
+                        Outcome (JSON)</h5>
+                    <pre id="jsonSummary"
+                        class="json-box"><code>// Summary will generate when the call ends...</code></pre>
                 </div>
             </div>
 
             <!-- Right Column: Test Orders Helper Panel -->
             <div class="col-lg-5">
                 <div class="card card-custom p-4 bg-light">
-                    <h5 class="fw-semibold mb-3"><i class="fa-solid fa-box-archive me-2 text-warning"></i>Test Orders Helper</h5>
-                    <p class="text-muted small">Use these sample order IDs while talking to test order lookups instantly:</p>
+                    <h5 class="fw-semibold mb-3"><i class="fa-solid fa-box-archive me-2 text-warning"></i>Test Orders
+                        Helper</h5>
+                    <p class="text-muted small">Use these sample order IDs while talking to test order lookups
+                        instantly:</p>
 
                     <div class="list-group">
                         <div class="list-group-item list-group-item-action border-0 mb-2 rounded shadow-sm">
@@ -154,7 +184,60 @@
         let isCallActive = false;
         let transcriptLog = [];
         let recognition = null;
+        let speechRecognitionFailed = false;
+        let speechRecognitionErrorMessage = "";
         let lastIntentData = null;
+        let ordersDiscussed = {};
+
+        function updateCallOutcome(data, userMessage) {
+            const outcome = data.call_outcome || {};
+            const validOrderIds = ["ORD-101", "ORD-102", "ORD-103"];
+
+            // Trust validated IDs and order summaries returned by the backend.
+            // Do not construct order IDs from raw customer text, which can turn
+            // invalid inputs such as "UID 1003" into false orders.
+            if (Array.isArray(outcome.orders_discussed)) {
+                outcome.orders_discussed.forEach(item => {
+                    if (!item || !validOrderIds.includes(item.order_id)) return;
+                    ordersDiscussed[item.order_id] = {
+                        order_id: item.order_id,
+                        customer_intents: Array.isArray(item.customer_intents)
+                            ? item.customer_intents
+                            : [],
+                        resolution_status: item.resolution_status || "UNKNOWN"
+                    };
+                });
+            }
+
+            const orderId = validOrderIds.includes(outcome.order_id)
+                ? outcome.order_id
+                : (validOrderIds.includes(lastIntentData?.order_id)
+                    ? lastIntentData.order_id
+                    : null);
+
+            const customerIntent = outcome.customer_intent ||
+                lastIntentData?.customer_intent || "GENERAL_INQUIRY";
+            const resolutionStatus = outcome.resolution_status || "UNKNOWN";
+            const allOrders = Object.values(ordersDiscussed);
+            // Prefer the backend's full summary so action requirements and
+            // per-order explanations are not lost in the frontend.
+            const callSummary = outcome.call_summary || (
+                allOrders.length
+                    ? allOrders.map(order =>
+                        `${order.order_id}: intents ${order.customer_intents.join(", ")}; ` +
+                        `resolution ${order.resolution_status}`
+                    ).join(" | ")
+                    : `Customer intent: ${customerIntent}. No valid order identified.`
+            );
+
+            lastIntentData = {
+                customer_intent: customerIntent,
+                order_id: orderId,
+                resolution_status: resolutionStatus,
+                orders_discussed: allOrders,
+                call_summary: callSummary
+            };
+        }
 
         // Initialize Web Speech Recognition
         function initSpeechRecognition() {
@@ -166,13 +249,21 @@
 
             const rec = new SpeechRecognition();
             rec.lang = 'en-IN'; // Set to Indian English for Aria's persona
+
             rec.interimResults = false;
-            rec.maxAlternatives = 1;
+            rec.maxAlternatives = 3;
 
             rec.onresult = async (event) => {
-                const userSpeech = event.results[0][0].transcript;
+                const alternatives = Array.from(event.results[0]);
+
+                const bestMatch = alternatives.find(result =>
+                    /\b(ord|order(?:\s+id|\s+number)?)\b/i.test(result.transcript)
+                );
+
+                const userSpeech = (bestMatch || alternatives[0]).transcript;
+
                 addMessageToTranscript("Customer", userSpeech);
-                
+
                 // Update state to Thinking
                 updateState('thinking', 'bg-warning text-dark', 'Thinking...');
 
@@ -184,9 +275,9 @@
                         body: JSON.stringify({ message: userSpeech })
                     });
                     const data = await response.json();
-                    
+
                     if (data.success) {
-                        lastIntentData = data;
+                        updateCallOutcome(data, userSpeech);
                         addMessageToTranscript("Aria", data.response);
                         speakText(data.response);
                     }
@@ -198,18 +289,39 @@
                 }
             };
 
-            rec.onerror = (event) => {
-                console.warn("Speech recognition error:", event.error);
-                if (isCallActive && event.error !== 'no-speech') {
-                    setTimeout(() => { try { rec.start(); } catch(e){} }, 1000);
+
+            rec.onerror = function (event) {
+                console.error("Speech recognition error:", event.error);
+                speechRecognitionFailed = true;
+
+                let message;
+                if (event.error === "network") {
+                    message = "Voice recognition needs an internet connection. Check your connection, retry voice, or type your message below.";
+                } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+                    message = "Microphone or speech-recognition access was denied. Check browser permissions, or type your message below.";
+                } else if (event.error === "audio-capture") {
+                    message = "No microphone was detected. Check your microphone, or type your message below.";
+                } else if (event.error === "no-speech") {
+                    speechRecognitionFailed = false;
+                    return;
+                } else if (event.error === "aborted" && !isCallActive) {
+                    return;
+                } else {
+                    message = "Voice recognition is unavailable right now. Retry voice or type your message below.";
                 }
+
+                speechRecognitionErrorMessage = message;
+                updateState("error", "bg-danger text-white", "Voice unavailable");
+                document.getElementById("retryVoiceBtn").hidden = !isCallActive;
+                addMessageToTranscript("System", message);
             };
 
             rec.onend = () => {
-                // Automatically restart listening if the call is still active and Aria isn't speaking
-                if (isCallActive) {
+                // Do not loop on network errors; let the customer retry explicitly.
+                if (isCallActive && !speechRecognitionFailed) {
                     setTimeout(() => {
-                        try { rec.start(); } catch (e) {}
+                        if (!isCallActive || speechRecognitionFailed) return;
+                        try { rec.start(); } catch (e) { }
                     }, 500);
                 }
             };
@@ -225,44 +337,99 @@
 
         function startCall() {
             isCallActive = true;
+            speechRecognitionFailed = false;
+            speechRecognitionErrorMessage = "";
             document.getElementById('startBtn').disabled = true;
             document.getElementById('endBtn').disabled = false;
+            document.getElementById('retryVoiceBtn').hidden = true;
+            updateState('listening', 'bg-success text-white', 'Listening...');
             document.getElementById('transcriptBox').innerHTML = '';
             transcriptLog = [];
             lastIntentData = null;
-            
+            ordersDiscussed = {};
+
             const greeting = "Hello! Welcome to Aura Skincare. My name is Aria. How can I help you today?";
             addMessageToTranscript("Aria", greeting);
             speakText(greeting);
 
             recognition = initSpeechRecognition();
             if (recognition) {
-                try { recognition.start(); } catch(e) {}
+                try { recognition.start(); } catch (e) { }
             }
         }
 
-        function endCall() {
-            isCallActive = false;
+        function retryVoiceRecognition() {
+            if (!isCallActive) return;
+            speechRecognitionFailed = false;
+            speechRecognitionErrorMessage = "";
+            document.getElementById("retryVoiceBtn").hidden = true;
+
+            // Use a fresh instance after a browser speech-service network error.
             if (recognition) {
-                try { recognition.stop(); } catch(e) {}
+                try { recognition.onend = null; recognition.stop(); } catch (e) { }
             }
-            window.speechSynthesis.cancel(); // Stop any ongoing speech
+            recognition = initSpeechRecognition();
+            if (!recognition) {
+                speechRecognitionFailed = true;
+                updateState("error", "bg-danger text-white", "Voice unavailable");
+                document.getElementById("retryVoiceBtn").hidden = false;
+                return;
+            }
+            updateState("listening", "bg-success text-white", "Listening...");
+            try {
+                recognition.start();
+            } catch (error) {
+                console.error("Could not restart speech recognition:", error);
+                speechRecognitionFailed = true;
+                updateState("error", "bg-danger text-white", "Voice unavailable");
+                document.getElementById("retryVoiceBtn").hidden = false;
+                addMessageToTranscript("System", "Could not restart voice recognition. Please try again or type your message below.");
+            }
+        }
+
+        async function endCall() {
+            isCallActive = false;
+            speechRecognitionFailed = true;
+            document.getElementById('retryVoiceBtn').hidden = true;
+
+            if (recognition) {
+                try {
+                    recognition.stop();
+                } catch (e) { }
+            }
+
+            window.speechSynthesis.cancel();
 
             document.getElementById('startBtn').disabled = false;
             document.getElementById('endBtn').disabled = true;
             updateState('idle', 'bg-secondary text-white', 'Call Ended');
-            
-            // Generate Structured JSON Summary based on last interaction or default
+
+            // Capture the summary before clearing the server session.
             const summary = {
-                "customer_intent": lastIntentData ? lastIntentData.intent : "GENERAL_INQUIRY",
-                "order_id": lastIntentData && lastIntentData.order_id ? lastIntentData.order_id : null,
-                "resolution_status": "RESOLVED",
-                "call_summary": transcriptLog.length > 1 
-                    ? `Conversation concluded. Last discussed topic: ${lastIntentData ? lastIntentData.intent : 'General support'}.` 
+                customer_intent: lastIntentData?.customer_intent || "GENERAL_INQUIRY",
+                order_id: lastIntentData?.order_id || null,
+                resolution_status: lastIntentData?.resolution_status || "UNKNOWN",
+                orders_discussed: Object.values(ordersDiscussed),
+                call_summary: transcriptLog.length > 1
+                    ? (
+                        lastIntentData?.call_summary ||
+                        `Conversation concluded. Last discussed topic: ${lastIntentData?.customer_intent || "General support"}.`
+                    )
                     : "Call ended shortly after greeting."
             };
-            document.getElementById('jsonSummary').textContent = JSON.stringify(summary, null, 4);
+
+            document.getElementById('jsonSummary').textContent =
+                JSON.stringify(summary, null, 4);
+
+            // Clear the server session after generating the summary.
+            try {
+                await fetch('/api/reset', { method: 'POST' });
+                console.log("Call session reset!");
+            } catch (error) {
+                console.error("Failed to reset call session:", error);
+            }
         }
+
 
         function addMessageToTranscript(sender, text) {
             const box = document.getElementById('transcriptBox');
@@ -271,41 +438,124 @@
             }
             const msgDiv = document.createElement('div');
             msgDiv.className = `message-bubble ${sender === 'Aria' ? 'agent-msg' : 'user-msg'}`;
-            msgDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
+            const senderLabel = document.createElement('strong');
+            senderLabel.textContent = `${sender}:`;
+            msgDiv.appendChild(senderLabel);
+            msgDiv.appendChild(document.createTextNode(` ${text}`));
             box.appendChild(msgDiv);
             box.scrollTop = box.scrollHeight;
-            
+
             transcriptLog.push({ sender, text });
+        }
+        async function sendTextMessage() {
+            const inputField = document.getElementById('userInputText');
+            const userMessage = inputField.value.trim();
+            if (!userMessage) return;
+
+            addMessageToTranscript("Customer", userMessage);
+            inputField.value = '';
+
+            updateState('thinking', 'bg-warning text-dark', 'Thinking...');
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: userMessage })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    updateCallOutcome(data, userMessage);
+                    addMessageToTranscript("Aria", data.response);
+                    speakText(data.response);
+                }
+            } catch (error) {
+                console.error("Error communicating with backend:", error);
+                const errorMsg = "I'm having trouble connecting to my servers right now.";
+                addMessageToTranscript("Aria", errorMsg);
+                speakText(errorMsg);
+            }
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendTextMessage();
+            }
         }
 
         function speakText(text) {
-            if ('speechSynthesis' in window) {
-                // Pause recognition while Aria is speaking to avoid picking up her own voice
-                if (recognition) {
-                    try { recognition.stop(); } catch(e) {}
-                }
-
-                updateState('speaking', 'bg-primary text-white', 'Speaking...');
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.rate = 1.0;
-                utterance.pitch = 1.0;
-                
-                const voices = window.speechSynthesis.getVoices();
-                const indianVoice = voices.find(v => v.lang === 'en-IN' || v.name.includes('India') || v.name.includes('Google English (India)'));
-                if (indianVoice) utterance.voice = indianVoice;
-
-                utterance.onend = () => {
-                    if (isCallActive) {
-                        updateState('listening', 'bg-success text-white', 'Listening...');
-                        setTimeout(() => {
-                            try { recognition.start(); } catch(e) {}
-                        }, 300);
-                    }
-                };
-
-                window.speechSynthesis.speak(utterance);
+            if (!('speechSynthesis' in window)) {
+                console.warn("Speech synthesis is not supported in this browser.");
+                return;
             }
+
+            window.speechSynthesis.cancel();
+
+            let cleanText = text
+                .replace(/[*_#`~]/g, '')
+                .replace(/[-]{2,}/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            const utterance = new SpeechSynthesisUtterance(cleanText);
+            const voices = window.speechSynthesis.getVoices();
+
+            // Detect the language from the response script.
+            const hasHindi = /[\u0900-\u097F]/.test(cleanText);
+
+            if (hasHindi) {
+                // Prefer a Hindi voice when Aria replies in Hindi.
+                utterance.lang = 'hi-IN';
+
+                const hindiVoice = voices.find(v =>
+                    v.lang.toLowerCase() === 'hi-in'
+                ) || voices.find(v =>
+                    v.lang.toLowerCase().startsWith('hi')
+                );
+
+                if (hindiVoice) {
+                    utterance.voice = hindiVoice;
+                } else {
+                    console.warn(
+                        "No Hindi voice is available. Check Chrome/Windows voice support."
+                    );
+                }
+            } else {
+                // Use an English voice for English responses.
+                utterance.lang = 'en-IN';
+
+                const preferredVoice = voices.find(v =>
+                    v.name.includes('Google India English')
+                ) || voices.find(v =>
+                    v.name.includes('Google UK English Female')
+                ) || voices.find(v =>
+                    v.name.includes('Microsoft Zira')
+                ) || voices.find(v =>
+                    v.lang.toLowerCase() === 'en-in'
+                ) || voices.find(v =>
+                    v.lang.toLowerCase().startsWith('en')
+                );
+
+                if (preferredVoice) {
+                    utterance.voice = preferredVoice;
+                }
+            }
+
+            utterance.rate = 0.95;
+            utterance.pitch = 1.05;
+            utterance.volume = 1.0;
+
+            window.speechSynthesis.speak(utterance);
+        }
+
+        // Ensure browser voices are loaded (some browsers like Chrome load voices asynchronously)
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = () => {
+                window.speechSynthesis.getVoices();
+            };
         }
     </script>
 </body>
+
 </html>
