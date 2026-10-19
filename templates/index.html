@@ -184,6 +184,9 @@
         let isCallActive = false;
         let transcriptLog = [];
         let recognition = null;
+        let isSpeaking = false;
+        let isProcessing = false;
+        let speechPlaybackId = 0;
         let speechRecognitionFailed = false;
         let speechRecognitionErrorMessage = "";
         let lastIntentData = null;
@@ -260,14 +263,15 @@
                     /\b(ord|order(?:\s+id|\s+number)?)\b/i.test(result.transcript)
                 );
 
+                // Pause listening immediately while the request is processed.
+                // This prevents overlapping recognition and Aria's audio playback.
+                isProcessing = true;
+                try { rec.stop(); } catch (e) { }
+
                 const userSpeech = (bestMatch || alternatives[0]).transcript;
-
                 addMessageToTranscript("Customer", userSpeech);
-
-                // Update state to Thinking
                 updateState('thinking', 'bg-warning text-dark', 'Thinking...');
 
-                // Send to Flask backend
                 try {
                     const response = await fetch('/api/chat', {
                         method: 'POST',
@@ -280,12 +284,20 @@
                         updateCallOutcome(data, userSpeech);
                         addMessageToTranscript("Aria", data.response);
                         speakText(data.response);
+                    } else {
+                        const errorMsg = "I'm having trouble processing that right now. Please try again.";
+                        addMessageToTranscript("Aria", errorMsg);
+                        speakText(errorMsg);
                     }
                 } catch (error) {
                     console.error("Error communicating with backend:", error);
                     const errorMsg = "I'm having trouble connecting to my servers right now. Could you please repeat that?";
                     addMessageToTranscript("Aria", errorMsg);
                     speakText(errorMsg);
+                } finally {
+                    isProcessing = false;
+                    // If speech playback did not start for any reason, resume listening.
+                    if (!isSpeaking) scheduleRecognitionRestart();
                 }
             };
 
@@ -317,16 +329,23 @@
             };
 
             rec.onend = () => {
-                // Do not loop on network errors; let the customer retry explicitly.
-                if (isCallActive && !speechRecognitionFailed) {
-                    setTimeout(() => {
-                        if (!isCallActive || speechRecognitionFailed) return;
-                        try { rec.start(); } catch (e) { }
-                    }, 500);
-                }
+                // Recognition must stay paused while Aria speaks or the backend responds.
+                if (!isSpeaking && !isProcessing) scheduleRecognitionRestart();
             };
 
             return rec;
+        }
+
+        function scheduleRecognitionRestart() {
+            setTimeout(() => {
+                if (!isCallActive || speechRecognitionFailed || isSpeaking || isProcessing || !recognition) return;
+                try {
+                    recognition.start();
+                    updateState('listening', 'bg-success text-white', 'Listening...');
+                } catch (e) {
+                    // SpeechRecognition may already be starting; ignore that harmless race.
+                }
+            }, 650);
         }
 
         function updateState(state, badgeClass, text) {
@@ -348,14 +367,14 @@
             lastIntentData = null;
             ordersDiscussed = {};
 
+            isSpeaking = false;
+            isProcessing = false;
             const greeting = "Hello! Welcome to Aura Skincare. My name is Aria. How can I help you today?";
             addMessageToTranscript("Aria", greeting);
-            speakText(greeting);
 
             recognition = initSpeechRecognition();
-            if (recognition) {
-                try { recognition.start(); } catch (e) { }
-            }
+            // Let the greeting finish before opening the microphone to avoid feedback.
+            speakText(greeting);
         }
 
         function retryVoiceRecognition() {
@@ -389,6 +408,9 @@
 
         async function endCall() {
             isCallActive = false;
+            isSpeaking = false;
+            isProcessing = false;
+            speechPlaybackId++;
             speechRecognitionFailed = true;
             document.getElementById('retryVoiceBtn').hidden = true;
 
@@ -455,6 +477,8 @@
             addMessageToTranscript("Customer", userMessage);
             inputField.value = '';
 
+            isProcessing = true;
+            if (recognition) { try { recognition.stop(); } catch (e) { } }
             updateState('thinking', 'bg-warning text-dark', 'Thinking...');
 
             try {
@@ -469,12 +493,19 @@
                     updateCallOutcome(data, userMessage);
                     addMessageToTranscript("Aria", data.response);
                     speakText(data.response);
+                } else {
+                    const errorMsg = "I'm having trouble processing that right now. Please try again.";
+                    addMessageToTranscript("Aria", errorMsg);
+                    speakText(errorMsg);
                 }
             } catch (error) {
                 console.error("Error communicating with backend:", error);
                 const errorMsg = "I'm having trouble connecting to my servers right now.";
                 addMessageToTranscript("Aria", errorMsg);
                 speakText(errorMsg);
+            } finally {
+                isProcessing = false;
+                if (!isSpeaking) scheduleRecognitionRestart();
             }
         }
 
@@ -485,8 +516,18 @@
         }
 
         function speakText(text) {
+            const playbackId = ++speechPlaybackId;
+
+            // Keep the microphone paused during all text-to-speech playback.
+            isSpeaking = true;
+            if (recognition) {
+                try { recognition.stop(); } catch (e) { }
+            }
+
             if (!('speechSynthesis' in window)) {
                 console.warn("Speech synthesis is not supported in this browser.");
+                isSpeaking = false;
+                scheduleRecognitionRestart();
                 return;
             }
 
@@ -545,6 +586,18 @@
             utterance.rate = 0.95;
             utterance.pitch = 1.05;
             utterance.volume = 1.0;
+
+            const finishSpeech = () => {
+                // Ignore completion events from an utterance that was cancelled/replaced.
+                if (playbackId !== speechPlaybackId) return;
+                isSpeaking = false;
+                if (isCallActive && !speechRecognitionFailed) {
+                    updateState('listening', 'bg-success text-white', 'Listening...');
+                    scheduleRecognitionRestart();
+                }
+            };
+            utterance.onend = finishSpeech;
+            utterance.onerror = finishSpeech;
 
             window.speechSynthesis.speak(utterance);
         }
